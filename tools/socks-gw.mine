@@ -1,0 +1,19 @@
+#!/bin/bash
+
+PROXY=proxy-shz.intel.com
+PORT=1080
+
+case $1 in
+       # list internal git servers here that you do not want to use
+       # the proxy with, separated by a pipe character '|' as below:
+*.intel.com)
+        METHOD="-X connect"
+        ;;
+*)
+        METHOD="-X 5 -x ${PROXY}:${PORT}"
+        ;;
+esac
+
+/bin/nc $METHOD $*
+
+
