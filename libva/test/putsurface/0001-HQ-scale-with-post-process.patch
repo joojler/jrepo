@@ -1,0 +1,250 @@
+From 0c6cd4c6e2aecd5d26b179f5b23b21eefdaf9217 Mon Sep 17 00:00:00 2001
+From: tangjun <junx.tang@intel.com>
+Date: Mon, 27 Oct 2014 03:09:34 -0700
+Subject: [PATCH 1/1] HQ scale with post process
+
+---
+ test/putsurface/putsurface_common.c |  157 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 144 insertions(+), 13 deletions(-)
+
+diff --git a/test/putsurface/putsurface_common.c b/test/putsurface/putsurface_common.c
+index 3806bbc..dd55b9f 100755
+--- a/test/putsurface/putsurface_common.c
++++ b/test/putsurface/putsurface_common.c
+@@ -38,6 +38,8 @@
+ #include <assert.h>
+ #include <pthread.h>
+ 
++#include <va/va_vpp.h>
++
+ /*currently, if XCheckWindowEvent was called  in more than one thread, it would cause
+  * XIO:  fatal IO error 11 (Resource temporarily unavailable) on X server ":0.0"
+  *       after 87 requests (83 known processed) with 0 events remaining.
+@@ -69,7 +71,7 @@ static  VASurfaceID surface_id[SURFACE_NUM];
+ static  pthread_mutex_t surface_mutex[SURFACE_NUM];
+ 
+ static  void *drawable_thread0, *drawable_thread1;
+-static  int surface_width = 352, surface_height = 288;
++static  int surface_width = 800, surface_height = 600;
+ static  int win_x = 0, win_y = 0;
+ static  int win_width = 352, win_height = 288;
+ static  int frame_rate = 0;
+@@ -87,6 +89,11 @@ static  int csc_src_fourcc = 0, csc_dst_fourcc = 0;
+ static  VAImage csc_dst_fourcc_image;
+ static  VASurfaceID csc_render_surface;
+ 
++static  int test_scale = 1;
++static  VAContextID vpp_context = VA_INVALID_ID;
++static	VAProcPipelineParameterBuffer *pipeline_param = NULL;
++static 	VABufferID pipeline_param_buf_id = VA_INVALID_ID;
++static  VASurfaceID scale_surface;
+ 
+ typedef struct {
+     char* fmt_str;
+@@ -312,6 +319,41 @@ cleanup:
+     return test_color_conversion;
+ }
+ 
++static int scale_preparation()
++{
++    VAStatus va_status;
++
++    va_status = vaCreateConfig(va_dpy, VAProfileNone, VAEntrypointVideoProc,
++        NULL, 0, &vpp_config_id);
++    CHECK_VASTATUS(va_status, "vaCreateConfig()");
++
++    va_status = vaCreateContext(va_dpy, vpp_config_id, 0, 0, 0,
++        NULL, 0, &vpp_context);
++    CHECK_VASTATUS(va_status, "vaCreateContext()");
++
++    va_status = vaCreateBuffer(va_dpy, vpp_context,
++        VAProcPipelineParameterBufferType, sizeof(*pipeline_param), 
++	1, NULL, &pipeline_param_buf_id);
++    CHECK_VASTATUS(va_status, "vaCreateBuffer()");
++
++    va_status = vaMapBuffer(va_dpy, pipeline_param_buf_id, (void **)&pipeline_param);
++    CHECK_VASTATUS(va_status, "vaMapBuffer()");
++    
++    VASurfaceAttrib surface_attribs[1], * const s_attrib = &surface_attribs[0];
++    s_attrib->type = VASurfaceAttribPixelFormat;
++    s_attrib->flags = VA_SURFACE_ATTRIB_SETTABLE;
++    s_attrib->value.type = VAGenericValueTypeInteger;
++    s_attrib->value.value.i = VA_FOURCC_NV12;
++
++    va_status = vaCreateSurfaces(va_dpy, VA_RT_FORMAT_YUV420, 
++                                 win_width, win_height,
++                                 &scale_surface, 1, 
++                                 surface_attribs, 1);
++    CHECK_VASTATUS(va_status,"vaCreateSurfaces");
++
++    return va_status;
++}
++
+ static VASurfaceID get_next_free_surface(int *index)
+ {
+     VASurfaceStatus surface_status;
+@@ -353,7 +395,7 @@ static int upload_source_YUV_once_for_all()
+     VAImage surface_image;
+     void *surface_p=NULL, *U_start,*V_start;
+     VAStatus va_status;
+-    int box_width_loc=8;
++    int box_width_loc=64;
+     int row_shift_loc=0;
+     int i;
+     
+@@ -412,6 +454,7 @@ static void* putsurface_thread(void *data)
+     unsigned int frame_num=0, start_time, putsurface_time;
+     VARectangle cliprects[2]; /* client supplied clip list */
+     int continue_display = 0;
++    VARectangle src_rect, dst_rect; 
+     
+     if (drawable == drawable_thread0)
+         printf("Enter into thread0\n\n");
+@@ -456,25 +499,98 @@ static void* putsurface_thread(void *data)
+                                     0, 0, surface_width, surface_height, 
+                                     0, 0, surface_width, surface_height);
+             CHECK_VASTATUS(vaStatus,"vaPutImage");
+-            
+-            // render the temp surface, it should be same with original surface without color conversion test
+-            vaStatus = vaPutSurface(va_dpy, csc_render_surface, CAST_DRAWABLE(drawable),
++
++            if (test_scale) {
++                memset(pipeline_param, 0, sizeof(*pipeline_param));
++
++                src_rect.x = src_rect.y = 0;
++                src_rect.width = surface_width;
++                src_rect.height = surface_height;
++                pipeline_param->surface = csc_render_surface;
++                pipeline_param->surface_region = &src_rect;
++                pipeline_param->surface_color_standard = VAProcColorStandardNone;
++
++                dst_rect.x = dst_rect.y = 0;
++                dst_rect.width = win_width;
++                dst_rect.height = win_height;
++                pipeline_param->output_region = &dst_rect;
++                pipeline_param->output_color_standard = VAProcColorStandardNone;
++                pipeline_param->output_background_color = 0xff000000;
++                pipeline_param->filter_flags =  528;
++                pipeline_param->filters = NULL;
++                pipeline_param->num_filters = 0;
++                
++                vaStatus = vaBeginPicture(va_dpy, vpp_context, scale_surface);
++                CHECK_VASTATUS(vaStatus,"vaBeginPiture");
++
++                vaStatus = vaRenderPicture(va_dpy, vpp_context, &pipeline_param_buf_id, 1);
++                CHECK_VASTATUS(vaStatus,"vaRenderPiture");
++
++                vaStatus = vaEndPicture(va_dpy, vpp_context);
++                CHECK_VASTATUS(vaStatus,"vaEndPiture");
++
++                vaStatus = vaPutSurface(va_dpy, scale_surface, CAST_DRAWABLE(drawable),
++                                    0,0,win_width,win_height,
++                                    10,10,win_width,win_height,
++				    NULL, 0,
++                                    display_field);
++                CHECK_VASTATUS(vaStatus,"vaPutSurface");
++            } else {
++                // render the temp surface, it should be same with original surface without color conversion test
++                vaStatus = vaPutSurface(va_dpy, csc_render_surface, CAST_DRAWABLE(drawable),
+                                     0,0,surface_width,surface_height,
+                                     0,0,width,height,
+                                     (test_clip==0)?NULL:&cliprects[0],
+                                     (test_clip==0)?0:2,
+-                                    display_field);
+-            CHECK_VASTATUS(vaStatus,"vaPutSurface");
+-    
++                                    512);
++                CHECK_VASTATUS(vaStatus,"vaPutSurface");
++           }
+         }
+         else {
+-            vaStatus = vaPutSurface(va_dpy, surface_id, CAST_DRAWABLE(drawable),
++            if (test_scale) {
++                memset(pipeline_param, 0, sizeof(*pipeline_param));
++
++                src_rect.x = src_rect.y = 0;
++                src_rect.width = surface_width;
++                src_rect.height = surface_height;
++                pipeline_param->surface = surface_id;
++                pipeline_param->surface_region = &src_rect;
++                pipeline_param->surface_color_standard = VAProcColorStandardNone;
++
++                dst_rect.x = dst_rect.y = 0;
++                dst_rect.width = win_width;
++                dst_rect.height = win_height;
++                pipeline_param->output_region = &dst_rect;
++                pipeline_param->output_color_standard = VAProcColorStandardNone;
++                pipeline_param->output_background_color = 0xff000000;
++                pipeline_param->filter_flags =  528;
++                pipeline_param->filters = NULL;
++                pipeline_param->num_filters = 0;
++                
++                vaStatus = vaBeginPicture(va_dpy, vpp_context, scale_surface);
++                CHECK_VASTATUS(vaStatus,"vaBeginPiture");
++
++                vaStatus = vaRenderPicture(va_dpy, vpp_context, &pipeline_param_buf_id, 1);
++                CHECK_VASTATUS(vaStatus,"vaRenderPiture");
++
++                vaStatus = vaEndPicture(va_dpy, vpp_context);
++                CHECK_VASTATUS(vaStatus,"vaEndPiture");
++
++                vaStatus = vaPutSurface(va_dpy, scale_surface, CAST_DRAWABLE(drawable),
++                                    0,0,win_width,win_height,
++                                    0,0,win_width,win_height,
++				    NULL, 0,
++                                    display_field);
++                CHECK_VASTATUS(vaStatus,"vaPutSurface");
++            } else {
++                vaStatus = vaPutSurface(va_dpy, surface_id, CAST_DRAWABLE(drawable),
+                                     0,0,surface_width,surface_height,
+-                                    0,0,width,height,
++                                    25,50,width,height,
+                                     (test_clip==0)?NULL:&cliprects[0],
+                                     (test_clip==0)?0:2,
+-                                    display_field);
+-            CHECK_VASTATUS(vaStatus,"vaPutSurface");
++                                    /*display_field*/512);
++                CHECK_VASTATUS(vaStatus,"vaPutSurface");
++            }
+         }
+     
+         putsurface_time += (get_tick_count() - start_time);
+@@ -627,12 +743,16 @@ int main(int argc,char **argv)
+         fprintf(stderr, "Can't open the connection of display!\n");
+         exit(-1);
+     }
+-    create_window(win_display, win_x, win_y, win_width, win_height);
++    create_window(win_display, win_x, win_y, win_width+50, win_height+100);
+ 
+     va_dpy = vaGetDisplay(win_display);
+     va_status = vaInitialize(va_dpy, &major_ver, &minor_ver);
+     CHECK_VASTATUS(va_status, "vaInitialize");
+ 
++    if (test_scale) {
++       ret = scale_preparation();
++    }
++
+     if (test_color_conversion) {
+         ret = csc_preparation();
+     }
+@@ -672,6 +792,17 @@ int main(int argc,char **argv)
+         CHECK_VASTATUS(va_status,"vaDestroyImage");
+     }
+ 
++    if (test_scale) {
++        vaUnmapBuffer(va_dpy, pipeline_param_buf_id);
++	vaDestroyBuffer(va_dpy, pipeline_param_buf_id);
++        vaDestroySurfaces(va_dpy, &scale_surface, 1);
++    }
++
++    if (vpp_context != VA_INVALID_ID) {
++        vaDestroyContext(va_dpy, vpp_context);
++        vpp_context = VA_INVALID_ID;
++    }
++
+     if (vpp_config_id != VA_INVALID_ID) {
+         vaDestroyConfig (va_dpy, vpp_config_id);
+         vpp_config_id = VA_INVALID_ID;
+-- 
+1.7.9.5
+
