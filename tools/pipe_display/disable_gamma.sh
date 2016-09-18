@@ -1,0 +1,3 @@
+intel_reg_write 0x1F2180 0x80000004
+intel_reg_write 0x1F2380 0x80000004
+intel_reg_write 0x1F2580 0x80000004
