@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 
-#define THROUGHPUT      (800*1024*1024)
+#define THROUGHPUT      (1000*1024*1024)
 #define MAX_THREAD 	(256)
 #define BUF_SIZE	(16*1024)
 #define SLEEP_INTERVAL	(10) //ms
