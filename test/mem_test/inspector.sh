@@ -1,0 +1,1 @@
+/opt/intel/inspector_2017.1.2.497970/bin64/inspxe-cl -collect mi1 -knob detect-leaks-on-exit=false -knob enable-on-demand-leak-detection=true -knob enable-memory-growth-detection=true -knob stack-depth=16 -executable-of-interest=mem_test ./mem_test
