@@ -1,6 +1,2 @@
 
-
-for file in $1
-do
-	patch -p1 <$file
-done
+for i in ../patches/*.patch; do patch -p1 <$i; done
